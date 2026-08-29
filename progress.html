@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IRON LOG — Progress</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav class="topnav">
+    <div class="brand">IRON <span>LOG</span></div>
+    <div class="nav-links">
+      <a href="index.html">Split</a>
+      <a href="progress.html" class="active">Progress</a>
+    </div>
+  </nav>
+
+  <div id="dbError"></div>
+
+  <div class="stat-row">
+    <div class="stat"><div class="num" id="sessionsNum">0</div><div class="lbl">Sessions logged</div></div>
+    <div class="stat"><div class="num" id="exNum">0</div><div class="lbl">Exercises tracked</div></div>
+    <div class="stat"><div class="num" id="streakNum">0</div><div class="lbl">Day streak</div></div>
+  </div>
+
+  <p class="card-title">Progress by exercise</p>
+  <div class="ex-grid" id="exGrid"></div>
+
+  <footer class="tip" id="footerTip" style="display:none;">The gold line tracks weight; the faded bars behind it track volume (weight × sets × reps) — watching both together shows whether you're progressing even when the weight number alone looks flat. Hover any point or bar for that session's exact numbers.</footer>
+</div>
+
+<script>
+(function(){
+  function pad(n){ return n<10 ? '0'+n : ''+n; }
+  function isoDate(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
+  function escapeHtml(str){ const d=document.createElement('div'); d.textContent=str; return d.innerHTML; }
+
+  let state = { schedule: {}, logs: [] };
+
+  async function loadData(){
+    const res = await fetch('api/get_data.php');
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Request failed');
+    state.schedule = data.schedule;
+    state.logs = data.logs;
+  }
+
+  function showDbError(msg){
+    document.getElementById('dbError').innerHTML = `<div class="db-error">
+      Couldn't reach the database. ${escapeHtml(msg)}<br><br>
+      Make sure Apache + MySQL are running in XAMPP, and that you've imported <code>sql/schema.sql</code>
+      into a database called <code>gym_tracker</code> once. Then reload this page.
+    </div>`;
+  }
+
+  function computeGlobalStats(){
+    const dates = new Set(state.logs.map(l => l.date));
+    document.getElementById('sessionsNum').textContent = dates.size;
+
+    const exNames = new Set(state.logs.map(l => l.exercise));
+    document.getElementById('exNum').textContent = exNames.size;
+
+    let streak = 0;
+    let cursor = new Date();
+    if(!dates.has(isoDate(cursor))) cursor.setDate(cursor.getDate()-1);
+    while(dates.has(isoDate(cursor))){ streak++; cursor.setDate(cursor.getDate()-1); }
+    document.getElementById('streakNum').textContent = streak;
+  }
+
+  function comboChartSVG(entries){
+    const w = 600, h = 130, padX = 10, padTop = 10, padBottom = 20;
+    const plotH = h - padTop - padBottom;
+
+    if(entries.length === 1){
+      const e = entries[0];
+      return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+        <line x1="${padX}" y1="${h-padBottom}" x2="${w-padX}" y2="${h-padBottom}" stroke="var(--border)" stroke-width="1"/>
+        <circle cx="${w/2}" cy="${padTop + plotH/2}" r="4" fill="var(--brass)">
+          <title>${e.date}: ${e.weight}kg × ${e.sets} × ${e.reps} (volume ${Math.round(e.weight*e.sets*e.reps)})</title>
+        </circle>
+      </svg>`;
+    }
+
+    const weights = entries.map(e => e.weight);
+    const volumes = entries.map(e => e.weight * e.sets * e.reps);
+    let wMin = Math.min(...weights), wMax = Math.max(...weights);
+    if(wMin === wMax){ wMin -= 5; wMax += 5; }
+    let vMax = Math.max(...volumes) || 1;
+
+    const spanX = w - padX*2;
+    const n = entries.length;
+    const barW = Math.min(20, (spanX/n) * 0.5);
+
+    // Volume bars — scaled to their own max, drawn behind the weight line.
+    const bars = entries.map((e, i) => {
+      const x = padX + (i/(n-1)) * spanX;
+      const vol = e.weight * e.sets * e.reps;
+      const barH = (vol/vMax) * plotH;
+      return `<rect x="${(x-barW/2).toFixed(1)}" y="${(padTop + plotH - barH).toFixed(1)}" width="${barW.toFixed(1)}" height="${barH.toFixed(1)}" fill="var(--accent)" opacity="0.25" rx="1">
+        <title>${e.date}: ${e.weight}kg × ${e.sets} × ${e.reps} (volume ${Math.round(vol)})</title>
+      </rect>`;
+    }).join('');
+
+    // Weight line — scaled to its own min/max, drawn on top.
+    const coords = entries.map((e, i) => {
+      const x = padX + (i/(n-1)) * spanX;
+      const y = padTop + (1 - (e.weight-wMin)/(wMax-wMin)) * plotH;
+      return {x, y, e};
+    });
+    const poly = coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ');
+    const dots = coords.map(c => `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="3.5" fill="var(--brass)">
+      <title>${c.e.date}: ${c.e.weight}kg × ${c.e.sets} × ${c.e.reps} (volume ${Math.round(c.e.weight*c.e.sets*c.e.reps)})</title>
+    </circle>`).join('');
+
+    return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+      <line x1="${padX}" y1="${h-padBottom}" x2="${w-padX}" y2="${h-padBottom}" stroke="var(--border)" stroke-width="1"/>
+      ${bars}
+      <polyline points="${poly}" fill="none" stroke="var(--brass)" stroke-width="2"/>
+      ${dots}
+    </svg>`;
+  }
+
+  function renderExercises(){
+    const grid = document.getElementById('exGrid');
+    const exNames = Array.from(new Set(state.logs.map(l => l.exercise))).sort();
+
+    if(!exNames.length){
+      grid.innerHTML = `<div class="empty-state">No sessions logged yet.<br><br>Go to <a href="index.html">Split</a>, add exercises to your split days, and log a session to see your progress here.</div>`;
+      document.getElementById('footerTip').style.display = 'none';
+      return;
+    }
+    document.getElementById('footerTip').style.display = 'block';
+
+    grid.innerHTML = '';
+    exNames.forEach(name => {
+      const entries = state.logs.filter(l => l.exercise === name).sort((a,b) => a.date < b.date ? -1 : 1);
+      const maxWeight = Math.max(...entries.map(e => e.weight));
+      const latest = entries[entries.length-1];
+      const prev = entries.length > 1 ? entries[entries.length-2] : null;
+      const volOf = e => e.weight * e.sets * e.reps;
+      const latestVolume = volOf(latest);
+
+      let trendClass = 'flat', trendLabel = '— steady';
+      if(prev){
+        if(latest.weight > prev.weight){ trendClass = 'up'; trendLabel = `▲ +${(latest.weight-prev.weight).toFixed(1)}kg`; }
+        else if(latest.weight < prev.weight){ trendClass = 'down'; trendLabel = `▼ ${(latest.weight-prev.weight).toFixed(1)}kg`; }
+      }
+
+      let volTrendClass = 'flat', volTrendLabel = '— steady';
+      if(prev){
+        const prevVolume = volOf(prev);
+        const diff = latestVolume - prevVolume;
+        if(diff > 0){ volTrendClass = 'up'; volTrendLabel = `▲ +${Math.round(diff)}`; }
+        else if(diff < 0){ volTrendClass = 'down'; volTrendLabel = `▼ ${Math.round(diff)}`; }
+      }
+
+      const card = document.createElement('div');
+      card.className = 'ex-card';
+      card.innerHTML = `
+        <div class="ex-card-head">
+          <div class="ex-title">${escapeHtml(name)}</div>
+          <div class="trend-group">
+            <div class="trend ${trendClass}" title="Change in weight vs previous session">${trendLabel} wt</div>
+            <div class="trend ${volTrendClass}" title="Change in volume (weight × sets × reps) vs previous session">${volTrendLabel} vol</div>
+          </div>
+        </div>
+        <div class="mini-stats">
+          <div class="mini-stat"><div class="v">${entries.length}</div><div class="k">Sessions</div></div>
+          <div class="mini-stat"><div class="v">${maxWeight}kg</div><div class="k">Max weight</div></div>
+          <div class="mini-stat"><div class="v">${latest.weight}kg</div><div class="k">Latest weight</div></div>
+          <div class="mini-stat"><div class="v">${latest.sets}×${latest.reps}</div><div class="k">Latest sets×reps</div></div>
+          <div class="mini-stat"><div class="v">${Math.round(latestVolume).toLocaleString()}</div><div class="k">Latest volume</div></div>
+        </div>
+        <div class="chart-wrap">
+          ${comboChartSVG(entries)}
+          <div class="chart-caption"><span>${entries[0].date}</span><span>${entries[entries.length-1].date}</span></div>
+          <div class="chart-legend">
+            <span class="chart-legend-item"><span class="swatch line"></span>Weight (kg)</span>
+            <span class="chart-legend-item"><span class="swatch bar"></span>Volume (wt × sets × reps)</span>
+          </div>
+        </div>
+        <div class="history-scroll">
+          <table class="history">
+            <thead><tr><th>Date</th><th>Weight</th><th>Sets</th><th>Reps</th><th>Volume</th></tr></thead>
+            <tbody>
+              ${entries.slice().reverse().map(e => `<tr><td>${e.date}</td><td>${e.weight}kg</td><td>${e.sets}</td><td>${e.reps}</td><td>${Math.round(volOf(e)).toLocaleString()}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+      grid.appendChild(card);
+    });
+  }
+
+  (async function init(){
+    try{
+      await loadData();
+      computeGlobalStats();
+      renderExercises();
+    }catch(err){
+      showDbError(err.message);
+    }
+  })();
+})();
+</script>
+</body>
+</html>

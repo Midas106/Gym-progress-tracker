@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IRON LOG — Split</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div class="wrap">
+  <nav class="topnav">
+    <div class="brand">IRON <span>LOG</span></div>
+    <div class="nav-links">
+      <a href="index.html" class="active">Split</a>
+      <a href="progress.html">Progress</a>
+    </div>
+  </nav>
+
+  <div id="dbError"></div>
+
+  <div class="stat-row">
+    <div class="stat"><div class="num" id="streakNum">0</div><div class="lbl">Day streak</div></div>
+    <div class="stat"><div class="num" id="monthNum">0</div><div class="lbl">This month</div></div>
+    <div class="stat"><div class="num" id="totalNum">0</div><div class="lbl">All time</div></div>
+  </div>
+
+  <section class="card">
+    <p class="card-title">Weekly split</p>
+    <p class="card-sub" id="todayLabel"></p>
+    <div class="split-grid" id="splitGrid"></div>
+  </section>
+
+  <section class="card">
+    <div class="cal-nav">
+      <button id="prevMonth">&#8249;</button>
+      <div class="cal-month" id="calMonthLabel"></div>
+      <button id="nextMonth">&#8250;</button>
+    </div>
+    <div class="cal-grid" id="calWeekdays"></div>
+    <div class="cal-grid" id="calGrid" style="margin-top:6px;"></div>
+    <div class="legend">
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--surface-2)"></span> No session logged</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:#1e2419;border-color:var(--ok)"></span> Went to the gym (click a day to view/edit)</div>
+      <div class="legend-item"><span class="legend-swatch" style="background:var(--surface-2);border-color:var(--brass)"></span> Today</div>
+    </div>
+  </section>
+
+  <footer class="tip">Exercises stay on your split — just fill in today's weight, sets and reps right on the exercise and hit save. The date is set by the server, not your browser, so it's always accurate. Click any day on the calendar to view or edit that day's numbers, or to mark/unmark attendance by hand.</footer>
+</div>
+
+<div id="dayModalBackdrop" class="modal-backdrop">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title" id="dayModalTitle">Day</div>
+      <button class="modal-close" id="dayModalClose">&times;</button>
+    </div>
+    <button class="modal-attendance" id="dayModalAttendance">Mark: went to the gym</button>
+    <div class="modal-ex-list" id="dayModalExList"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  // Monday-first week. DISPLAY_ORDER maps display column -> JS Date.getDay() value (0=Sun..6=Sat).
+  const DISPLAY_ORDER = [1,2,3,4,5,6,0];
+  const DAY_NAMES_MON = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+  let state = { schedule: {}, logs: [], attendance: [] };
+  let viewDate = new Date(); viewDate.setDate(1);
+
+  function pad(n){ return n<10 ? '0'+n : ''+n; }
+  function isoDate(d){ return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
+  function todayISO(){ return isoDate(new Date()); }
+  function mondayIndex(jsDow){ return (jsDow+6)%7; } // 0=Mon ... 6=Sun
+  function escapeHtml(str){ const d=document.createElement('div'); d.textContent=str; return d.innerHTML; }
+
+  async function api(path, body){
+    const res = await fetch('api/' + path, {
+      method: body ? 'POST' : 'GET',
+      headers: body ? {'Content-Type': 'application/json'} : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const data = await res.json();
+    if(!res.ok || data.error) throw new Error(data.error || 'Request failed');
+    return data;
+  }
+
+  function showDbError(msg){
+    document.getElementById('dbError').innerHTML = `<div class="db-error">
+      Couldn't reach the database. ${escapeHtml(msg)}<br><br>
+      Make sure Apache + MySQL are running in XAMPP, and that you've imported <code>sql/schema.sql</code>
+      into a database called <code>gym_tracker</code> once. Then reload this page.
+    </div>`;
+  }
+  function clearDbError(){ document.getElementById('dbError').innerHTML = ''; }
+
+  async function loadData(){
+    const data = await api('get_data.php');
+    state.schedule = data.schedule;
+    state.logs = data.logs;
+    state.attendance = data.attendance || [];
+  }
+
+  function lastLogFor(exName, excludeToday){
+    const t = todayISO();
+    const entries = state.logs
+      .filter(l => l.exercise === exName && (!excludeToday || l.date !== t))
+      .sort((a,b)=> a.date < b.date ? 1 : -1);
+    return entries[0] || null;
+  }
+  function todayLogFor(exName){
+    const t = todayISO();
+    return state.logs.find(l => l.exercise === exName && l.date === t) || null;
+  }
+
+  /* ---------- Split grid ---------- */
+  function renderSplit(){
+    const grid = document.getElementById('splitGrid');
+    grid.innerHTML = '';
+    const todayJsDow = new Date().getDay();
+    document.getElementById('todayLabel').textContent =
+      'Today is ' + new Date().toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric' });
+
+    DISPLAY_ORDER.forEach((dow, col) => {
+      const label = DAY_NAMES_MON[col];
+      const day = state.schedule[dow];
+      const card = document.createElement('div');
+      card.className = 'day-card' + (dow === todayJsDow ? ' today' : '');
+
+      card.innerHTML = `
+        <div class="day-head">
+          <span class="day-name">${label}</span>
+          <input class="split-input" type="text" value="${escapeHtml(day.name)}" placeholder="Rest">
+        </div>
+        <div class="ex-list"></div>
+        <div class="add-ex">
+          <input type="text" placeholder="Add exercise…" class="new-ex-input">
+          <button class="new-ex-btn">+</button>
+        </div>
+      `;
+      grid.appendChild(card);
+
+      card.querySelector('.split-input').addEventListener('change', async (e) => {
+        const newName = e.target.value.trim() || 'Rest';
+        try{
+          await api('save_schedule.php', { dow, name: newName });
+          day.name = newName;
+          clearDbError();
+        }catch(err){ showDbError(err.message); }
+      });
+
+      const exList = card.querySelector('.ex-list');
+      renderExList(exList, dow);
+
+      const newInput = card.querySelector('.new-ex-input');
+      const addFn = async () => {
+        const val = newInput.value.trim();
+        if(!val) return;
+        try{
+          await api('add_exercise.php', { dow, name: val });
+          if(!day.exercises.includes(val)) day.exercises.push(val);
+          newInput.value = '';
+          clearDbError();
+          renderExList(exList, dow);
+        }catch(err){ showDbError(err.message); }
+      };
+      card.querySelector('.new-ex-btn').addEventListener('click', addFn);
+      newInput.addEventListener('keydown', (e) => { if(e.key==='Enter') addFn(); });
+    });
+  }
+
+  function renderExList(exList, dow){
+    const day = state.schedule[dow];
+    if(!day.exercises.length){
+      exList.innerHTML = '<div class="empty-note">No exercises added for this day yet.</div>';
+      return;
+    }
+    exList.innerHTML = '';
+    day.exercises.forEach((exName, idx) => {
+      const priorLast = lastLogFor(exName, true);
+      const todayEntry = todayLogFor(exName);
+
+      const item = document.createElement('div');
+      item.className = 'ex-item' + (todayEntry ? ' done-today' : '');
+      item.innerHTML = `
+        <div class="ex-item-top">
+          <div>
+            <div class="ex-name">${escapeHtml(exName)}</div>
+            <div class="ex-last">${priorLast ? `Last: ${priorLast.weight}kg × ${priorLast.sets} × ${priorLast.reps} on ${priorLast.date}` : 'Not logged before'}</div>
+          </div>
+          <button class="del-ex" title="Remove exercise from split">&times;</button>
+        </div>
+        <div class="today-form">
+          <div class="f"><label>Weight kg</label><input type="number" min="0" step="0.5" class="f-weight" placeholder="0" value="${todayEntry ? todayEntry.weight : ''}"></div>
+          <div class="f"><label>Sets</label><input type="number" min="1" step="1" class="f-sets" placeholder="0" value="${todayEntry ? todayEntry.sets : ''}"></div>
+          <div class="f"><label>Reps</label><input type="number" min="1" step="1" class="f-reps" placeholder="0" value="${todayEntry ? todayEntry.reps : ''}"></div>
+          <button class="today-save">${todayEntry ? 'Update' : 'Save'}</button>
+        </div>
+      `;
+      exList.appendChild(item);
+
+      item.querySelector('.ex-item-top').addEventListener('click', (e) => {
+        if(e.target.closest('.del-ex')) return;
+        item.classList.toggle('open');
+      });
+
+      item.querySelector('.del-ex').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try{
+          await api('delete_exercise.php', { dow, name: exName });
+          day.exercises.splice(idx,1);
+          clearDbError();
+          renderExList(exList, dow);
+        }catch(err){ showDbError(err.message); }
+      });
+
+      const saveBtn = item.querySelector('.today-save');
+      saveBtn.addEventListener('click', async () => {
+        const weight = parseFloat(item.querySelector('.f-weight').value) || 0;
+        const sets = parseInt(item.querySelector('.f-sets').value, 10) || 0;
+        const reps = parseInt(item.querySelector('.f-reps').value, 10) || 0;
+        if(!sets || !reps){ item.querySelector('.f-sets').focus(); return; }
+
+        saveBtn.disabled = true;
+        try{
+          const res = await api('save_log.php', { exercise: exName, weight, sets, reps });
+          const t = res.date;
+          const existing = state.logs.find(l => l.exercise === exName && l.date === t);
+          if(existing){ existing.weight = weight; existing.sets = sets; existing.reps = reps; }
+          else state.logs.push({ date: t, exercise: exName, weight, sets, reps });
+
+          clearDbError();
+          saveBtn.textContent = 'Saved ✓';
+          saveBtn.classList.add('saved');
+          item.classList.add('done-today');
+          setTimeout(() => {
+            saveBtn.textContent = 'Update';
+            saveBtn.classList.remove('saved');
+            saveBtn.disabled = false;
+            item.classList.remove('open');
+          }, 1200);
+          renderCalendar();
+          computeStats();
+        }catch(err){
+          showDbError(err.message);
+          saveBtn.disabled = false;
+        }
+      });
+    });
+  }
+
+  /* ---------- Attendance calendar (Monday-first) ---------- */
+  function renderWeekdayHeader(){
+    document.getElementById('calWeekdays').innerHTML = DAY_NAMES_MON.map(d => `<div class="cal-weekday">${d}</div>`).join('');
+  }
+
+  function loggedDatesSet(){
+    const s = new Set(state.logs.map(l => l.date));
+    state.attendance.forEach(d => s.add(d));
+    return s;
+  }
+
+  async function toggleAttendance(dateKey){
+    const res = await api('toggle_attendance.php', { date: dateKey });
+    if(res.marked){
+      if(!state.attendance.includes(dateKey)) state.attendance.push(dateKey);
+    }else{
+      state.attendance = state.attendance.filter(d => d !== dateKey);
+    }
+    renderCalendar();
+    computeStats();
+    return res.marked;
+  }
+
+  /* ---------- Day modal (view/edit any past or present day) ---------- */
+  function exercisesForDate(dateKey){
+    const [y,m,d] = dateKey.split('-').map(Number);
+    const dow = new Date(y, m-1, d).getDay();
+    const day = state.schedule[dow];
+    return day ? day.exercises : [];
+  }
+
+  function formatDateLabel(dateKey){
+    const [y,m,d] = dateKey.split('-').map(Number);
+    return new Date(y, m-1, d).toLocaleDateString('en-US', { weekday:'long', month:'short', day:'numeric' });
+  }
+
+  const dayModalBackdrop = document.getElementById('dayModalBackdrop');
+  const dayModalTitle = document.getElementById('dayModalTitle');
+  const dayModalAttendance = document.getElementById('dayModalAttendance');
+  const dayModalExList = document.getElementById('dayModalExList');
+  let modalDateKey = null;
+
+  function openDayModal(dateKey){
+    modalDateKey = dateKey;
+    const [y,m,d] = dateKey.split('-').map(Number);
+    const dow = new Date(y, m-1, d).getDay();
+    const dayName = state.schedule[dow] ? state.schedule[dow].name : '';
+    dayModalTitle.textContent = formatDateLabel(dateKey) + (dayName ? ` — ${dayName}` : '');
+    renderDayModalAttendance();
+    renderDayModalExList();
+    dayModalBackdrop.classList.add('show');
+  }
+
+  function closeDayModal(){
+    dayModalBackdrop.classList.remove('show');
+    modalDateKey = null;
+  }
+
+  function renderDayModalAttendance(){
+    const marked = state.attendance.includes(modalDateKey) || state.logs.some(l => l.date === modalDateKey);
+    dayModalAttendance.textContent = marked ? '✓ Marked — went to the gym' : 'Mark: went to the gym';
+    dayModalAttendance.classList.toggle('marked', marked);
+  }
+
+  function renderDayModalExList(){
+    const names = exercisesForDate(modalDateKey);
+    if(!names.length){
+      dayModalExList.innerHTML = '<div class="empty-note">No exercises scheduled for this day\'s split — nothing to log here.</div>';
+      return;
+    }
+    dayModalExList.innerHTML = '';
+    names.forEach(exName => {
+      const entry = state.logs.find(l => l.exercise === exName && l.date === modalDateKey) || null;
+
+      const row = document.createElement('div');
+      row.className = 'modal-ex-row';
+      row.innerHTML = `
+        <div class="modal-ex-row-top">
+          <div class="ex-name">${escapeHtml(exName)}</div>
+          ${entry ? '<button class="modal-ex-del" title="Remove this entry">&times;</button>' : ''}
+        </div>
+        <div class="today-form">
+          <div class="f"><label>Weight kg</label><input type="number" min="0" step="0.5" class="f-weight" placeholder="0" value="${entry ? entry.weight : ''}"></div>
+          <div class="f"><label>Sets</label><input type="number" min="1" step="1" class="f-sets" placeholder="0" value="${entry ? entry.sets : ''}"></div>
+          <div class="f"><label>Reps</label><input type="number" min="1" step="1" class="f-reps" placeholder="0" value="${entry ? entry.reps : ''}"></div>
+          <button class="today-save">${entry ? 'Update' : 'Save'}</button>
+        </div>
+      `;
+      dayModalExList.appendChild(row);
+
+      const saveBtn = row.querySelector('.today-save');
+      saveBtn.addEventListener('click', async () => {
+        const weight = parseFloat(row.querySelector('.f-weight').value) || 0;
+        const sets = parseInt(row.querySelector('.f-sets').value, 10) || 0;
+        const reps = parseInt(row.querySelector('.f-reps').value, 10) || 0;
+        if(!sets || !reps){ row.querySelector('.f-sets').focus(); return; }
+
+        saveBtn.disabled = true;
+        try{
+          const res = await api('save_log.php', { exercise: exName, weight, sets, reps, date: modalDateKey });
+          const t = res.date;
+          const existing = state.logs.find(l => l.exercise === exName && l.date === t);
+          if(existing){ existing.weight = weight; existing.sets = sets; existing.reps = reps; }
+          else state.logs.push({ date: t, exercise: exName, weight, sets, reps });
+
+          clearDbError();
+          renderDayModalExList();
+          renderDayModalAttendance();
+          renderSplit();
+          renderCalendar();
+          computeStats();
+        }catch(err){
+          showDbError(err.message);
+          saveBtn.disabled = false;
+        }
+      });
+
+      const delBtn = row.querySelector('.modal-ex-del');
+      if(delBtn){
+        delBtn.addEventListener('click', async () => {
+          try{
+            await api('delete_log.php', { exercise: exName, date: modalDateKey });
+            state.logs = state.logs.filter(l => !(l.exercise === exName && l.date === modalDateKey));
+            clearDbError();
+            renderDayModalExList();
+            renderDayModalAttendance();
+            renderSplit();
+            renderCalendar();
+            computeStats();
+          }catch(err){ showDbError(err.message); }
+        });
+      }
+    });
+  }
+
+  dayModalAttendance.addEventListener('click', async () => {
+    dayModalAttendance.disabled = true;
+    try{
+      await toggleAttendance(modalDateKey);
+      renderDayModalAttendance();
+      clearDbError();
+    }catch(err){ showDbError(err.message); }
+    dayModalAttendance.disabled = false;
+  });
+  document.getElementById('dayModalClose').addEventListener('click', closeDayModal);
+  dayModalBackdrop.addEventListener('click', (e) => { if(e.target === dayModalBackdrop) closeDayModal(); });
+
+  function renderCalendar(){
+    const y = viewDate.getFullYear(), m = viewDate.getMonth();
+    document.getElementById('calMonthLabel').textContent =
+      viewDate.toLocaleDateString('en-US', { month:'long', year:'numeric' }).toUpperCase();
+
+    const firstOffset = mondayIndex(new Date(y,m,1).getDay());
+    const daysInMonth = new Date(y,m+1,0).getDate();
+    const grid = document.getElementById('calGrid');
+    grid.innerHTML = '';
+    const logged = loggedDatesSet();
+    const tISO = todayISO();
+
+    for(let i=0;i<firstOffset;i++){
+      const cell = document.createElement('div');
+      cell.className = 'cal-day empty';
+      grid.appendChild(cell);
+    }
+    for(let d=1; d<=daysInMonth; d++){
+      const key = `${y}-${pad(m+1)}-${pad(d)}`;
+      const cell = document.createElement('div');
+      cell.className = 'cal-day';
+      if(key === tISO) cell.classList.add('today');
+      if(logged.has(key)) cell.classList.add('went');
+      cell.innerHTML = `<span class="date-num">${d}</span>${logged.has(key) ? '<span class="dot"></span>' : ''}`;
+
+      if(key <= tISO){
+        cell.classList.add('clickable');
+        cell.title = 'Click to view or edit this day';
+        cell.addEventListener('click', () => openDayModal(key));
+      }
+      grid.appendChild(cell);
+    }
+  }
+
+  /* ---------- Stats ---------- */
+  function computeStats(){
+    const logged = loggedDatesSet();
+    document.getElementById('totalNum').textContent = logged.size;
+
+    const now = new Date();
+    const monthCount = Array.from(logged).filter(k => {
+      const [ky,km] = k.split('-').map(Number);
+      return ky === now.getFullYear() && (km-1) === now.getMonth();
+    }).length;
+    document.getElementById('monthNum').textContent = monthCount;
+
+    let streak = 0;
+    let cursor = new Date();
+    if(!logged.has(isoDate(cursor))) cursor.setDate(cursor.getDate()-1);
+    while(logged.has(isoDate(cursor))){
+      streak++;
+      cursor.setDate(cursor.getDate()-1);
+    }
+    document.getElementById('streakNum').textContent = streak;
+  }
+
+  document.getElementById('prevMonth').addEventListener('click', () => { viewDate.setMonth(viewDate.getMonth()-1); renderCalendar(); });
+  document.getElementById('nextMonth').addEventListener('click', () => { viewDate.setMonth(viewDate.getMonth()+1); renderCalendar(); });
+
+  // If the tab is left open across midnight, re-render so today's boxes clear themselves.
+  let lastKnownDate = todayISO();
+  setInterval(async () => {
+    const now = todayISO();
+    if(now !== lastKnownDate){
+      lastKnownDate = now;
+      try{
+        await loadData();
+        renderSplit();
+        renderCalendar();
+        computeStats();
+      }catch(err){ showDbError(err.message); }
+    }
+  }, 60000);
+
+  (async function init(){
+    try{
+      await loadData();
+      renderSplit();
+      renderWeekdayHeader();
+      renderCalendar();
+      computeStats();
+      clearDbError();
+    }catch(err){
+      showDbError(err.message);
+      renderWeekdayHeader();
+    }
+  })();
+})();
+</script>
+</body>
+</html>
